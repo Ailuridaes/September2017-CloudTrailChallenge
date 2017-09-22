@@ -10,6 +10,7 @@ using Amazon.IdentityManagement.Model;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.SNSEvents;
 using Amazon.S3;
+using Amazon.S3.Model;
 using Amazon.SimpleNotificationService;
 using Amazon.SimpleNotificationService.Model;
 using CloudTrailer.Models;
@@ -30,6 +31,7 @@ namespace CloudTrailer
         private IAmazonSimpleNotificationService SnsClient { get; }
         private IAmazonIdentityManagementService IamClient { get; }
         private static string AlertTopicArn => Environment.GetEnvironmentVariable("AlertTopicArn");
+        private readonly string CreateUserTopicArn = "arn:aws:sns:us-west-2:311339799303:cloudtrail-create-user-events";
 
         /// <summary>
         /// Default constructor. This constructor is used by Lambda to construct the instance. When invoked in a Lambda environment
@@ -46,11 +48,43 @@ namespace CloudTrailer
         public async Task FunctionHandler(SNSEvent evnt, ILambdaContext context)
         {
             // ### Level 1 - Create New Trail and Configure Lambda
-            context.Logger.LogLine(JsonConvert.SerializeObject(evnt));
+            // context.Logger.LogLine(JsonConvert.SerializeObject(evnt));
 
             // ### Level 2 - Retrieve Logs from S3
+            CloudTrailMessage message = JsonConvert.DeserializeObject<CloudTrailMessage>(evnt.Records[0].Sns.Message);
+            context.Logger.LogLine($"Bucket: {message.S3Bucket} Object key: {message.S3ObjectKey[0]}");
+            GetObjectRequest request = new GetObjectRequest 
+            {
+                BucketName = message.S3Bucket,
+                Key = message.S3ObjectKey[0]
+            };
 
-            // ### Level 3 - Filter for specific events and send alerts
+            byte[] responseByteArray;
+            using (GetObjectResponse response = await S3Client.GetObjectAsync(request))
+            {
+                using (Stream responseStream = response.ResponseStream)
+                using(var memoryStream = new MemoryStream())
+                {
+                    responseStream.CopyTo(memoryStream);
+                    responseByteArray = memoryStream.ToArray();
+                }
+            }
+            var records = await ExtractCloudTrailRecordsAsync(context.Logger, responseByteArray);
+
+            // ### Level 3 - Filter for specific events and send alerts]
+            foreach (var r in records.Records)
+            {
+                if(r.EventName == "CreateUser") {
+                    context.Logger.LogLine($"Super cool event '{r.EventName}'");
+                    var publishRequest = new PublishRequest
+                    {
+                        Subject = "Super cool event ALERT",
+                        Message = $"You have a super cool event \n {r.EventName} for user {r.RequestParameters["userName"]}",
+                        TopicArn = CreateUserTopicArn
+                    };
+                    await SnsClient.PublishAsync(publishRequest);
+                }
+            }
 
             // ### Boss level - Take mitigating action
         }
